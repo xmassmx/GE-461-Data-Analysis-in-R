@@ -1,0 +1,603 @@
+---
+title: <center>  GE 461 Introduction to Data Science </center>
+subtitle: <center> Project 1 <center>
+pagetitle: GE 461 Introduction to Data Science Project 1
+papersize: a4paper
+author: <center> Muhammad Abdullah Shafat Mulkana (21801075) </center>
+always_allow_html: true
+linkcolor: red
+output: 
+  bookdown::html_document2:
+    theme: readable
+    number_sections: true
+    code_folding: "hide"
+    toc: true
+  bookdown::pdf_document2:
+    number_sections: false
+# bibliography: GE461.bib
+link-citations: yes
+---
+
+
+
+
+```{r setup, include=FALSE}
+library(magrittr)
+library(tidyverse)
+library(car)
+library(knitr)
+library(kableExtra)
+library(pander)
+# library(glmnet)
+library(mltools)
+library(data.table)
+library(ggpubr)
+opts_chunk$set(echo = TRUE)
+
+options(knitr.kable.NA =".") 
+kable_format <- if (is_html_output()) "html" else "latex"
+options(scipen = 999)
+```
+
+<center> <h4> **Executive Summary** </h2> </center>
+
+In this report, we aim to model the attendance in order for the management to act accordingly to maximize the attendances and profits. We are presented with a dataset containing information about a single season of Dodger home games. There are four promotions that the management can run: caps, shirts, fireworks and bobble heads. We explore how these promotional items influence the attendance. We construct a model using all the available information but fine tune the model to find that the attendance can be significantly explained by using a simple linear regression model where we only need the month, day of the week, bobble head and fireworks information. Our results show that we can expect an increase of 17,028 people for games where there are fireworks and an increase of 10,995 people when bobble heads are sold. To further fine tune this model, we use a polynomial regression model where attendance can be modeled by month, day of week, fireworks, bobble heads, and the temperature. Our conclusion from this data is that to increase the attendance, we should have fireworks and bobble heads. However, due to the imbalance of the shirts and caps information in our data, we can not decisively conclude their affect on the attendance.
+
+
+# Exploratory data analysis
+
+In this part, we will explore out dataset. This includes identifying the type of data, i.e. numerical or categorical, the number of features, the distribution of these features. This will provide us with more insight into how we should construct the models.
+
+```{r load_summary, comment=NA}
+
+library(RSQLite)  ## if package is not on the computer, then install it only once using Tools > Install packages...
+con <- dbConnect(SQLite(), "../data/dodgers.sqlite")
+tbl(con, "events") %>% 
+  collect() %>% 
+  mutate(day_of_week = factor(day_of_week, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")),
+         month = factor(month, levels = c("APR","MAY","JUN","JUL","AUG","SEP","OCT"))) %>% 
+  mutate_if(is.character, factor) %>% 
+  mutate(temp = round((temp- 32)*5/9)) -> events
+
+head(events)
+str(events)
+```
+
+## Feature description
+
+From the above summary of the events database, we see that we have a tibble of size 81x12, i.e. data about all the 81 games played by the Dodgers team. For each of these games, we have the following features (columns):
+
+### month, day, attendance, day of week, opponent, Temperature
+
+These are the features indicating the month that the game was played in, the day, the attendance, the weekday, the opponent, and the temperature.
+
+```{r, histograms, fig.show="hold", out.width="50%"}
+barplot(summary(events$month), main = "Games per month", xlab = "month",ylab = "Games")
+hist(events$day, breaks = dim(events%>% count(day))[1], ,main = "Games per day", xlab = "day", ylab = "Games")
+hist(events$attend, breaks = 10, ,main = "Games per attendance", xlab = "attendance", ylab = "Games")
+barplot(summary(events$day_of_week), main = "Games per day of week", xlab = "Day of week",ylab = "Games", las=2, cex.names=0.6)
+barplot(summary(events$opponent), main = "Games per opponent", xlab = "Day of week",ylab = "Games", cex.names=0.6, las=2)
+hist(events$temp, breaks = 10 ,main = "Games vs. Temperature", xlab = "temperature", ylab = "Games")
+# Reference used for histograms: https://stackoverflow.com/questions/38994579/label-the-x-axis-correct-in-a-histogram-in-r
+# and bar plots: https://stackoverflow.com/questions/21639392/make-frequency-histogram-for-factor-variables
+```
+
+From the histograms of the month and the day of the week, we can see that there are less games played in October and less games played on Thursdays as compared to other months and days respectively. Furthermore, we can see that the team plays each opponent at least three times. The attendance and temperature data seems to follow a Gaussian distribution.
+
+### Skies,
+
+This feature indicates if the skies were clear or cloudy at the time of the game. Counting the frequency of each possible level, we find that there are 62 days when its clear and 19 days when it is cloudy.
+
+```{r comment=NA}
+summary(events$skies)
+```
+
+### day_night,
+
+This feature indicates the time of the day. We can see that there are 15 games played during the day and 66 games played at night.
+
+```{r comment=NA}
+summary(events$day_night)
+```
+
+### cap,
+
+This feature indicates if there were caps sold during the game. We have 79 games without and 2 games with caps sold. Due to the imbalance of this feature, i.e. in we have only two instances when caps are sold, we cannot expect to draw meaningful conclusions.
+
+```{r comment=NA}
+summary(events$cap)
+```
+
+### shirt,
+
+This feature indicates if shirts were sold at the match. we see that there are 78 games without and 3 games with shirts sold. Again, as with the caps, we see that there is a big imbalance in this feature which means that it will not be able to provide us with sufficient information about its impact on the attendance.
+
+```{r comment=NA}
+summary(events$shirt)
+```
+
+### fireworks,
+
+This feature indicates if there were fireworks at the match.
+
+```{r comment=NA}
+summary(events$fireworks)
+```
+
+### bobblehead.
+
+This feature indicates if there were bobbleheads sold at the match.
+
+```{r comment=NA}
+summary(events$bobblehead)
+```
+
+From this analysis, we can see that other than caps and shirts which have a severe imbalance, the other features can be useful in modeling the attendance at the game since they have more samples for each option (not evenly spread which would be better but relative to caps and shirts, it is better).
+
+## Correlation Analysis
+
+Next, we preprocess the data (one hot encoding) and find the correlation coefficient between the features and the attendance. Correlation tells us how attendance changes with change in each feature. Correlation can take any value between -1 and 1 where negative values mean that attendance decreases with an increase in that feature while a positive value indicates that attendance increases with increase in that feature. High magnitude represents a strong correlation while values near zero indicate that attendance is not affected by that feature much.
+
+```{r out.width="150%"}
+events_table <- one_hot(as.data.table(events)) # reference used: https://datatricks.co.uk/one-hot-encoding-in-r-three-simple-methods
+correlation <- cor(events_table[, get("attend")],events_table[,-"attend"])
+barplot(correlation,  cex.names=0.7, las=2, main = "Correlation of features with attendance",
+        ylab = "Correlation Coefficient")
+```
+
+We can see that the bobble head promotion is highly and positively correlated with the attendance while fireworks are uncorrelated, The two other promotions are also lightly positively correlated but as previously mentioned, the imbalance may cause this value to not conform to the reality.
+
+## Frequency of promotions
+
+In this section, we wish to further investigate the underlying relationships in our dataset. For this, we analyse the frequency of different features with respect to others. This includes the frequency of each promotion (shirts, caps, fireworks, and bobble head) with respect to the day and the month.
+
+Table \@ref(tab:monthweekday) and Figure \@ref(fig:barweekdaymonth) show us the number of games played each month and day of the week.
+
+```{r}
+events %>% 
+  count(day_of_week, month) %>% 
+  pivot_wider(names_from = day_of_week, values_from = n) %>% 
+  replace_na(0) %>%
+  pander(caption = "(\\#tab:monthweekday) Number of games played in each weekday and month")
+```
+
+```{r barweekdaymonth, fig.cap = "Barplot of counts of games for each weekday and month"}
+events %>% 
+  ggplot(aes(day_of_week)) +
+  geom_bar(aes(fill=month))
+  
+```
+
+Table \@ref(tab:monthdnskies) shows the number of games played at day/night and when the sky was cloudy/clear each month. Table \@ref(tab:daydnskies) shows the number of games played at day/night and when the sky was cloudy/clear each day of the week. Looking at the games with this perspective, we see that most of the games are played at night and when the sky was clear.
+
+```{r, fig.show="hold", out.width="50%"}
+month_dn <- events %>% 
+  count(day_night, month) %>% 
+  pivot_wider(names_from = day_night, values_from = n) %>% 
+  replace_na(0) 
+month_skies <- events %>% 
+  count(skies, month) %>% 
+  pivot_wider(names_from = skies, values_from = n) %>% 
+  replace_na(0) 
+cbind(month_dn, month_skies[,2:3])%>%
+pander(caption = "(\\#tab:monthdnskies) Frequency of day_night and skies with respect to month.")
+
+day_dn <- events %>% 
+  count(day_night, day_of_week) %>% 
+  pivot_wider(names_from = day_night, values_from = n) %>% 
+  replace_na(0) 
+day_skies <- events %>% 
+  count(skies, day_of_week) %>% 
+  pivot_wider(names_from = skies, values_from = n) %>% 
+  replace_na(0) 
+cbind(day_dn, day_skies[,2:3])%>%
+pander(caption = "(\\#tab:daydnskies) Frequency of day_night and skies with respect to the day of the week.")
+```
+
+Figure \@ref(fig:heatmap) shows the attendance of the games with respect to the month and the day of the week using a heatmap where the red color shows higher attendance and the yellow (lighter) color shows less attendance.
+
+```{r heatmap, fig.cap = "Heatmap of attendance versus weekday and month."}
+# Taken from the tutorial in class.
+xtabs(attend ~  month + day_of_week, events) %>% 
+  heatmap()
+```
+
+Bobble heads, shirts, caps, and fireworks are the four promotional features that the management uses to boost attendance. Table \@ref(tab:frequencyday) and \@ref(tab:frequencymonth) shows the frequency of all these different promotions on each day of the week and month respectively. As mentioned before, we see that the caps and shirts are sold twice and thrice respectively and are not very informative. The fireworks are mostly part of the games on Fridays but are relatively more evenly spread over the months. One more observation is that there is no promotion during the month of October.
+
+```{r}
+table_bobblehead <- events %>% 
+  count(day_of_week, bobblehead) %>% 
+  pivot_wider(names_from = bobblehead, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(bobblehead = YES)
+
+table_cap <- events %>% 
+  count(day_of_week, cap) %>% 
+  pivot_wider(names_from = cap, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(cap = YES)
+
+table_shirt <- events %>% 
+  count(day_of_week, shirt) %>% 
+  pivot_wider(names_from = shirt, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(shirt = YES)
+
+table_fireworks <- events %>% 
+  count(day_of_week, fireworks) %>% 
+  pivot_wider(names_from = fireworks, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(fireworks = YES)
+
+cbind(table_bobblehead[1:2],table_cap[2],table_shirt[2],table_fireworks[2]) %>%
+pander(caption = "(\\#tab:frequencyday) Frequency of promotions on each day of the week.")
+
+
+```
+
+```{r}
+table_bobblehead1 <- events %>% 
+  count(month, bobblehead) %>% 
+  pivot_wider(names_from = bobblehead, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(bobblehead = YES)
+
+table_cap1 <- events %>% 
+  count(month, cap) %>% 
+  pivot_wider(names_from = cap, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(cap = YES)
+
+table_shirt1 <- events %>% 
+  count(month, shirt) %>% 
+  pivot_wider(names_from = shirt, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(shirt = YES)
+
+table_fireworks1 <- events %>% 
+  count(month, fireworks) %>% 
+  pivot_wider(names_from = fireworks, values_from = n) %>% 
+  replace_na((YES = 0)) %>% 
+  mutate(Total = YES + NO) %>% 
+  select(-NO) %>% 
+  rename(fireworks = YES)
+cbind(table_bobblehead1[1:2],table_cap1[2],table_shirt1[2],table_fireworks1[2])%>%
+    pander(caption = "(\\#tab:frequencymonth) Frequency of promotions each month.")
+
+```
+
+Next, we plot the boxplots of some of the features with respect to the attendance. Boxplots show the median of the features, the lower and upper quartiles, the minimum, the maximum and any outliers. Statistically outliers are defined as an point lying outside the range: mean ± 1.5\*IQR where IQR: Inter-Quartile Range = upper quartile - lower quartile.
+
+We plot the features we plot for are: Month, Day of the Week, Day/Night, Skies, Bobble head, and fireworks.
+
+```{r, figures-side, fig.show="hold", out.width="50%"}
+# Adapted from the tutorial in class.
+events %>% 
+  ggplot(aes(month, attend)) +
+  geom_boxplot() +
+  labs(title = "Attendance vs. Month")
+
+events %>% 
+  ggplot(aes(day_of_week, attend)) +
+  geom_boxplot() +
+  labs(title = "Attendance vs. Day of Week")
+
+events %>% 
+  ggplot(aes(day_night, attend)) +
+  geom_boxplot()+
+  labs(title = "Attendance vs. Skies (Day/Night)")
+
+events %>% 
+  ggplot(aes(skies, attend)) +
+  geom_boxplot()+
+  labs(title = "Attendance vs. Clear/Cloudy")
+
+events %>% 
+  ggplot(aes(bobblehead, attend)) +
+  geom_boxplot()+
+  labs(title = "Attendance vs. Bobblehead")
+
+events %>% 
+  ggplot(aes(fireworks, attend)) +
+  geom_boxplot()+
+  labs(title = "Attendance vs. Fireworks")
+
+```
+
+According to the boxplot of Attendance vs. Skies (Day/Night), we see that the mean is the same for both the levels, which is also the same in the case of fireworks. This is consistent with the result of the correlation barplot where the correlation for fireworks is an extremely small value and similarly the correlation value for skies is small. Furthermore, we see that the correlation between the bobblehead and the attendance is strong which is seen by a higher boxplot for when bobbleheads were sold.
+
+# Hypothesis Testing
+
+Hypothesis testing can be used to draw conclusions about the statistical relationships between features. Here, we perform the test to see if there is an effect on the attendance due to the time of the day. The null hypothesis states that the true means of the distributions is the same. We calculate the p-value and if that is less than 5%, we reject the null hypothesis, otherwise, we do not reject it. Rejecting the null hypothesis means that there is a statistical difference between the means, while not rejecting the null hypothesis means that there is no statistical difference between the means of the two distributions.
+
+```{r comment=NA}
+# Taken from class tutorial
+t.test(x=events$attend[events$day_night=="Day"],
+       y=events$attend[events$day_night=="Night"])
+```
+
+When we do this T-test using the distributions of the time of the day, we see that the p-value is 0.6722. Since this is larger than 5%, we do not reject the null hypothesis which means that the true mean difference is equal to 0, i.e. there is no difference between games during the day or at night.
+
+We do the same test using the skies feature to determine if there is a statistical difference between the attendance when the sky was clear or cloudy.
+
+```{r comment=NA}
+t.test(x=events$attend[events$skies=="Clear"],
+       y=events$attend[events$skies=="Cloudy"])
+```
+
+Again, as we see, the p-value is 0.2 which is greater than 5%. Therefore, we do not reject the null hypothesis and we can claim that there is no statistical difference between the mean of attendance on clear and cloudy games.
+
+### Significance determination using linear models
+
+For the numerical features (day and temperature), we can create a scatter plot of the attendance and the features. Then using the 'geom_smooth()' function we can create a line showing the relationship between the two variables. Using a linear model, we can also find the approximate linear equation of the relationship.
+
+```{r comment=NA}
+# In the class, we performed the relationship between the attendance and the temperature as follows (i use 24 instead of 23 since it fits better):
+
+events %>%
+  ggplot(aes(temp, attend)) +
+  geom_jitter() +
+  geom_smooth(se = FALSE) +
+  geom_smooth(se = FALSE, method = "lm",
+              formula = y ~ x + pmax(0, x - 24)  , col = "red")
+  
+```
+
+The figure above shows the temperature plotted with respect to the attendance. the smoothing line drawn by the 'geom_smooth' function is plotted in blue. Using a linear relationship of the following type:
+
+$$
+attend = \beta_0 + \beta_1 temp + \beta_2 (temp - 24)^+ + \varepsilon_i
+$$
+
+we create the red line which seems to be very close to the actual relationship. In order to determine the coefficients of this line, we can use a linear regression model which gives us the following results:
+
+```{r comment=NA}
+lm(attend ~ temp + pmax(0, temp - 24), data = events) %>% summary()
+```
+
+From this result, we can determine the coefficients. The intercept is the attendance when temperature is 0. The coefficient of the temperature variable is positive which means that there is a positive correlation between the two. The other variable, i.e. pmax(0, temp - 24) has a negative coefficient meaning that there is a negative correlation. In terms of our case, when the temperature is zero, we have approximately 18388 people in the stadium. Until the temperature is 24 or less, we add 1124.3 people for every 1 degree increase in temperature. The maximum is when the temperature is 24 and then we decrease (1124.3-2269.4) people for each 1 degree increase in temperature.
+
+Following this analysis, we do the same for the remaining numerical feature, i.e. day. We plot the attendance vs. day scatter plot and try to fit the data.
+
+```{r comment=NA}
+# Adapted from class
+events %>%
+  ggplot(aes(day, attend)) +
+  geom_jitter() +
+  geom_smooth(se = FALSE) +
+  geom_smooth(se = FALSE, method = "lm",
+              formula = y ~ x  , col = "red")
+```
+
+Looking at the blue line. we see that the relationship between the variables is approximately linear. Thus, we use a linear model as such:
+
+$$
+attend = \beta_0 + \beta_1 day +  \varepsilon_i
+$$
+
+The result of this is plotted in the red line. Next, using the linear regression model, we can find the parameter values:
+
+```{r comment=NA}
+lm(attend ~ day, data = events) %>% summary()
+```
+
+From the results, we can see that there is always an attendance of 40662 with an increase of 23.4 for each day of the month. From the coefficient and the line in the graph, we can conclude that the day has a very small effect on the number of people that come to the games.
+
+# Regression Analysis
+
+In this section, we aim to create a model to predict the attendance. Our aim here is to not only create an accurate model but also keep it as simple as possible.
+
+## Ordinary Least Squares
+
+We start our analysis with the following model that takes into account all of the features available. Any predictor with a p-value that is smaller than 5% indicates that that particular feature is important and significant in modeling attendance. From the result below, we see that a model fitted on all predictors tells us that bobble head and the day of week (especially Tuesday) are important features to increase attendance. However this is a big model which includes unnecessary features. These features complicate the model while not providing much information about the attendance. Therefore, we start with a simpler model and gradually add features while checking their significance. We will compare the rest of the models compared to this one based on the **residual standard error i.e. 5979** and the **adjusted R-squared i.e. 0.4809**. For a better model, we expect the residual standard error should decrease while the adjusted R-squared should increase (adjusted R-squared will be between 0 and 1).
+
+```{r comment=NA}
+full_mod <- lm(attend ~ month + day_of_week + bobblehead + cap + shirt + fireworks + day + temp + day_night + skies + opponent, data = events)
+full_mod%>%summary()
+```
+
+We can use this model to predict the attendance in order to calculate the **root mean square error = 4406.356** The plot below shows the predicted (blue) and the actual (red) attendance. We can see that this model performs relatively well but as stated before, we wish to simplify it.
+
+```{r comment=NA}
+predictions_full <- predict(full_mod, data = events[,-"attend"])
+error_full <- (sum((predictions_full-events$attend)**2)/81)**0.5
+diff_full <- (predictions_full-events$attend)
+plot(predictions_full, type = 'o', col = 'blue', main = 'Attendace for the full model', ylab = 'attendance')
+lines(events$attend, type = 'o', col = 'red')
+
+```
+
+In order to find only certain features that significantly increase the performance, we use the anova() function and compare models while adding features. We start with bobble head and the day of the week since we already concluded that they are important features.
+
+```{r comment=NA}
+lm1 <- lm(attend ~ bobblehead + day_of_week, data=events)
+lm2 <- update(lm1, . ~ . + month)
+
+anova(lm1,lm2)
+```
+
+Since the p-value for the second model is less than 5%, we conclude that the predictor month is significant and therefore **we add this feature to our model** Now we add the other features one by one and test with this model to determine if the addition of each feature is significant to the performance of our model. Next, we add the day feature:
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + day)
+anova(lm2,lm3)
+```
+
+We see that the p-value is greater than 5%. Referring to the linear model plot (scatter plot) earlier, we see that the coefficient for the day parameter is very small, i.e. 23. For this case, the change in day versus the change in attendance is not very significant. This conforms to our current findings. **We decide not to include day predictor in the model.**
+
+Next, we try with the temperature feature:
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + temp)
+anova(lm2,lm3)
+```
+
+Again, we can observe the the p-value (0.6349) is more than 5% which means that we do not reject the null hypothesis and conclude that **the temperature feature is not significant in the prediction of attendance**. The next feature we test is skies
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + skies)
+anova(lm2,lm3)
+```
+
+We see that **the skies predictor is also not significant** as the p-value is less than 5%. Next we try the day_night predictor:
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + day_night)
+anova(lm2,lm3)
+```
+
+We see that the **day_night predictor is also not significant.** Next we try the opponent predictor:
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + opponent)
+anova(lm2,lm3)
+```
+
+We see that the **opponent predictor is also not significant.** Next we try the cap predictor:
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + cap)
+anova(lm2,lm3)
+```
+
+We see that **the cap predictor is also not significant.** Next we try the shirt predictor:
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + shirt)
+anova(lm2,lm3)
+```
+
+We see that **the shirt predictor is also not significant.** Next we try the fireworks predictor:
+
+```{r comment=NA}
+lm3 <- update(lm2, . ~ . + fireworks)
+anova(lm2,lm3)
+```
+
+We see that the p-value here is less than 5% and thus adding this to our model will significantly increase the attendance.
+
+After testing all these predictors, we see that the optimum model with the least number predictors is:
+
+$$
+attend = \beta_0 + \beta_1 bobblehead+ \beta_2 day_of_week + \beta_3 month+ \beta_4 firework +  \varepsilon_i
+$$
+
+```{r comment=NA}
+lm3%>%summary()
+```
+
+We can observe here that the **residual standard error has decreased from 5979 to 5858** whereas the **adjusted R-squared has increased from 0.04809 to 0.5015**.
+
+Again, we can predict the attendance using this model and calculate the **root mean square which comes out as 5288.229.** we see that this is less than that of the full model (4406.356) but that is to be expected since we loose some information when we do not use all of the data. We plot the attendance predicted by the model (blue) and the actual attendance (red).
+
+```{r comment=NA}
+predictions <- predict(lm3, data = select(events, month, day_of_week, bobblehead,fireworks))
+error <- (sum((predictions-events$attend)**2)/81)**0.5
+diff <- (predictions-events$attend)
+plot(events$attend, type = 'o', col = 'red', main = 'Attendance of smaller model', ylab = 'attendance')
+lines(predictions, type = 'o', col = 'blue')
+
+```
+
+The figure below shows the predictions of the full model (Red) and the small model (blue).
+
+```{r}
+plot(predictions, type = 'o', col = 'blue', main = 'Attendance predictions of the two models', ylab = 'attendance')
+lines(predictions_full, type = 'o', col = 'red')
+```
+
+Between the two linear models (full vs small) we get the **root mean square error = 2923.934.**
+
+```{r}
+error_both <- (sum((predictions-predictions_full)**2)/81)**0.5
+
+```
+
+# Polynomial Regression
+
+The models explored above are linear in nature. In this section we explore models with polynomials for the 'day' and 'temp' features. In the first one is an addition to the small linear model determined before where we add a polynomial term as follows 
+
+$$ 
+attend = \beta_0 + \beta_1 bobblehead+ \beta_2 day of week + \beta_3 month+ \beta_4 firework + \beta_5 temp + \beta_6 temp^2 +   \varepsilon_i
+$$
+
+Creating the model, we see that the **Residual standard error is 5660** which is less than the linear model and the **adjusted R-squared value is 0.5347.** From these values we see that the model performs better than the linear model.
+
+```{r comment=NA}
+poly_lm <- lm(attend ~ month +  day_of_week + poly(temp, 2) + bobblehead +fireworks , data = events) 
+poly_lm %>%summary()
+```
+
+In order to check if we should include the parameter to the linear model, we perform an anova analysis.
+
+```{r comment=NA}
+anova(lm3,poly_lm)
+```
+
+Looking at the anova result, we can see that the **p-value is 0.04** which is less than 5% and thus we can conclude that **adding this to the model is significant**. Next, we add a polynomial term for the day feature and get the following model:
+
+$$ 
+attend = \beta_0 + \beta_1 bobblehead+ \beta_2 day of week + \beta_3 month+ \beta_4 firework + \beta_5 temp + \beta_6 temp^2 + \beta_6 day^7 +   \varepsilon_i
+$$.
+
+```{r comment=NA}
+poly_lm1 <- lm(attend ~ month +  day_of_week + poly(temp, 2) + I(day^7) + bobblehead +fireworks , data = events)
+poly_lm1 %>% summary()
+```
+
+Looking at the **residual standard error** we see that it has **decreased from 5660 to 5590** and the value of **adjusted R-squared increases from 0.5347 to 0.5461.** Both indicate that the model performs better on the data. However, in order to determine if we should add this parameter to the final model, we perform the anova analysis again.
+
+```{r comment=NA}
+anova(lm3,poly_lm1)
+anova(poly_lm,poly_lm1)
+```
+
+looking at the anova analysis, we see that the p-value (0.03077) when comparing with the linear model is less than 5% but the p-value for the analysis between the two polynomial models is 0.1118 which is more than 5% and thus adding the day^7^ parameter to the model does not significantly improve the model. Therefore we conclude that the first polynomial model is the final regression model, i.e.
+
+**Final Model:** 
+
+$$ 
+attend = \beta_0 + \beta_1 bobblehead+ \beta_2 day of week + \beta_3 month+ \beta_4 firework + \beta_5 temp + \beta_6 temp^2 +   \varepsilon_i
+$$
+
+Predicting the attendance using the polynomial model and the data, we get an **Root Mean Square Error of 5031.066 (less than the linear model).** The plot below shows the actual attendance (red) and the predicted attendance (blue).
+
+```{r comment=NA}
+predictions_poly <- predict(poly_lm, data = select(events, month, day_of_week, bobblehead,fireworks,temp))
+error_poly <- (sum((predictions_poly-events$attend)**2)/81)**0.5
+error_poly
+diff_poly <- (predictions_poly-events$attend)
+plot(events$attend, type = 'o', col = 'red', main = 'Attendance of polymonial regression model', ylab = 'attendance')
+lines(predictions_poly, type = 'o', col = 'blue')
+
+```
+
+We can also calculate the root mean squares error between our best non linear model (best overall) and the best linear model to see the difference in the predictions. We get this value as: 1629.03
+
+```{r comment=NA}
+error_models <- (sum((predictions_poly-predictions)**2)/81)**0.5
+
+```
+
+---
+# Note: Some of the analysis code is taken from the tutorial in the class and expanded to apply to more features or to display information about features not shown in class.*
+
+# Also, acting as if this is a report to be presented to the Dodgers management, i added the references to some code as comments. These references are mostly portraying how a particular function is applied but i added them just in case.*
+
+# Since there is no reference to any other material in the report i decided to exclude the bibliography section.*
+---
+
