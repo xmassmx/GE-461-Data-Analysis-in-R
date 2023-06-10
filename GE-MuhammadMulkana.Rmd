@@ -3,7 +3,7 @@ title: <center>  GE 461 Introduction to Data Science </center>
 subtitle: <center> Project 1 <center>
 pagetitle: GE 461 Introduction to Data Science Project 1
 papersize: a4paper
-author: <center> Muhammad Abdullah Shafat Mulkana (21801075) </center>
+author: <center> Muhammad Abdullah Shafat Mulkana </center>
 always_allow_html: true
 linkcolor: red
 output: 
